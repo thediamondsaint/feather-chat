@@ -12,6 +12,15 @@ ShellRoot {
     property string chatTitle: "New conversation"
     property string chatProject: ""
     property string selectedProject: ""
+    property bool showArchived: false
+    property bool chatArchived: false
+    property int activeCount: 0
+    property int archivedCount: 0
+    property string actionChatId: ""
+    property string actionChatTitle: ""
+    property string actionChatProject: ""
+    property bool actionChatArchived: false
+    property var undoArchive: null
     property string selectedModel: ""
     property string accountLabel: ""
     property string activeAccount: ""
@@ -65,10 +74,11 @@ ShellRoot {
     function saveAppearance() {
         appearanceSaving = true;
         call({op:"preferences", values:{theme:Theme.themeId, background:backgroundStyle,
-             image:backgroundImage, fit:backgroundFit, strength:backgroundStrength}});
+             image:backgroundImage, fit:backgroundFit, strength:backgroundStrength, effects:Theme.effects}});
     }
     function applyAppearance(values) {
         Theme.themeId = values.theme;
+        Theme.effects = values.effects;
         backgroundStyle = values.background;
         backgroundImage = values.image;
         backgroundFit = values.fit;
@@ -80,28 +90,41 @@ ShellRoot {
         strengthSlider.value = values.strength;
     }
     function notify(message, error) {
+        undoArchive = null;
         banner = message;
         bannerError = !!error;
     }
     function refreshList() {
-        call({op: "list", query: search.text, project: selectedProject, limit: chatLimit});
+        call({op: "list", query: search.text, project: selectedProject, limit: chatLimit, archived: showArchived});
     }
     function projectName(id) {
         for (let p of projects) if (p.id === id) return p.name;
-        return "All conversations";
+        return "Unfiled";
+    }
+    function openChatActions(id, title, folder, archived, anchor) {
+        actionChatId = id; actionChatTitle = title;
+        actionChatProject = folder; actionChatArchived = archived;
+        chatMenu.popup(anchor, 0, anchor.height);
+    }
+    function setArchiveView(archived) {
+        showArchived = archived;
+        chatLimit = 60;
+        refreshList();
     }
     function newChat() {
         if (busy) return;
         chatId = "";
         chatTitle = "New conversation";
-        chatProject = selectedProject;
+        chatProject = selectedProject === "__unfiled__" ? "" : selectedProject;
+        chatArchived = false;
+        if (showArchived) setArchiveView(false);
         olderMessages = false;
         messages.clear();
         composer.text = "";
         composer.forceActiveFocus();
     }
     function send() {
-        if (busy || pendingSend || !composer.text.trim()) return;
+        if (busy || pendingSend || chatArchived || !composer.text.trim()) return;
         if (!connected || !planEnabled) { settings.open(); return; }
         if (!selectedModel) { notify("Refresh the models in Account settings before sending.", true); return; }
         pendingSend = true;
@@ -123,19 +146,22 @@ ShellRoot {
             break;
         case "chats":
             conversations.clear();
-            for (let row of e.rows) conversations.append({key:row.id, title:row.title, project:row.project_id || ""});
+            for (let row of e.rows) conversations.append({key:row.id, title:row.title, project:row.project_id || "", archived:!!row.archived});
             moreChats = e.more;
+            if (e.counts) { activeCount = e.counts.active; archivedCount = e.counts.archived; }
             break;
         case "projects":
             projects = e.rows;
             Qt.callLater(function() {
-                projectPicker.currentIndex = 0;
-                for (let i=0; i<projects.length; i++) if (projects[i].id === selectedProject) projectPicker.currentIndex=i+1;
+                projectPicker.currentIndex = selectedProject === "__unfiled__" ? 1 : 0;
+                for (let i=0; i<projects.length; i++) if (projects[i].id === selectedProject) projectPicker.currentIndex=i+2;
             });
             break;
         case "messages":
             if (e.prepend && e.chat !== chatId) break;
+            let changedChat = chatId !== e.chat;
             chatId = e.chat; chatTitle = e.info.title; chatProject = e.info.project_id || "";
+            chatArchived = !!e.info.archived;
             olderMessages = e.more;
             if (!e.prepend) messages.clear();
             for (let i=0; i<e.rows.length; i++) {
@@ -143,7 +169,7 @@ ShellRoot {
                 let item = {key:row.id, role:row.role, content:row.content, status:row.status};
                 if (e.prepend) messages.insert(i, item); else messages.append(item);
             }
-            if (!e.prepend) bottom();
+            if (!e.prepend) { bottom(); if (changedChat && Theme.effects) chatReveal.restart(); }
             else Qt.callLater(function() { transcript.positionViewAtIndex(e.rows.length, ListView.Beginning); });
             break;
         case "busy":
@@ -169,7 +195,24 @@ ShellRoot {
         case "auth_busy": authBusy = e.busy; break;
         case "notice": notify(e.message, false); break;
         case "error": pendingSend = false; appearanceSaving = false; notify(e.message, true); break;
-        case "deleted": if (chatId === e.chat) newChat(); break;
+        case "archived":
+            if (chatId === e.chat) chatArchived = e.archived;
+            notify(e.archived ? "Conversation archived." : "Conversation restored.", false);
+            undoArchive = {chat:e.chat, archived:!e.archived};
+            break;
+        case "renamed": if (chatId === e.chat) chatTitle = e.title; break;
+        case "moved":
+            if (chatId === e.chat) chatProject = e.project;
+            notify("Conversation moved to " + projectName(e.project) + ".", false);
+            break;
+        case "folder_deleted":
+            if (selectedProject === e.id) { selectedProject = ""; projectPicker.currentIndex = 0; }
+            if (chatProject === e.id) chatProject = "";
+            break;
+        case "deleted":
+            if (chatId === e.chat) newChat();
+            notify("Conversation deleted.", false);
+            break;
         }
     }
 
@@ -183,7 +226,7 @@ ShellRoot {
             root.ready = false;
             root.busy = false;
             root.pendingSend = false;
-            root.notify("The chat service stopped. Close and reopen Feather to reconnect.", true);
+            root.notify("The chat service stopped. Close and reopen FeatherGPT to reconnect.", true);
         }
         stdout: SplitParser {
             onRead: line => {
@@ -191,12 +234,12 @@ ShellRoot {
                 catch (error) { console.warn("Could not read a service event"); }
             }
         }
-        stderr: SplitParser { onRead: line => console.warn("Feather service reported an error") }
+        stderr: SplitParser { onRead: line => console.warn("FeatherGPT service reported an error") }
     }
 
     FloatingWindow {
         id: win
-        title: "Feather Chat"
+        title: "FeatherGPT"
         implicitWidth: 1000
         implicitHeight: 700
         minimumSize: Qt.size(580, 440)
@@ -229,9 +272,8 @@ ShellRoot {
                     RowLayout {
                         Layout.fillWidth: true
                         Logo { Layout.preferredWidth: 30; Layout.preferredHeight: 30 }
-                        Text { text: "feather"; color: root.fg; font.pixelSize: 22; font.weight: Font.DemiBold; font.family: "sans-serif" }
+                        Text { text: "FeatherGPT"; color: root.fg; font.pixelSize: 20; font.weight: Font.DemiBold; font.family: "sans-serif" }
                         Item { Layout.fillWidth: true }
-                        Text { text: "CHAT"; color: root.muted; font.pixelSize: 10; font.letterSpacing: 1.5 }
                     }
                     FButton { id: newConversationButton; text: "+   New conversation"; primary: true; Layout.fillWidth: true; enabled: !root.busy; onClicked: root.newChat() }
                     FField {
@@ -243,7 +285,7 @@ ShellRoot {
                     }
                     RowLayout {
                         Layout.fillWidth: true
-                        Text { text: "PROJECTS"; font.pixelSize: 10; font.letterSpacing: 1.5; color: root.muted }
+                        Text { text: "FOLDERS"; font.pixelSize: 10; font.letterSpacing: 1.5; color: root.muted }
                         Item { Layout.fillWidth: true }
                         FButton { text: "+"; subtle: true; implicitHeight: 26; onClicked: { projectDialog.editId = ""; projectTitle.text = ""; instructions.text = ""; projectDialog.open(); } }
                     }
@@ -251,7 +293,7 @@ ShellRoot {
                         id: projectPicker
                         Layout.fillWidth: true
                         implicitHeight: 34
-                        model: [{id:"", name:"All conversations"}].concat(root.projects)
+                        model: [{id:"", name:"All folders"},{id:"__unfiled__", name:"Unfiled"}].concat(root.projects)
                         textRole: "name"
                         font.pixelSize: 12
                         palette.text: root.fg
@@ -264,12 +306,12 @@ ShellRoot {
                             root.selectedProject = model[currentIndex].id;
                             root.chatLimit = 60;
                             root.refreshList();
-                            if (!root.chatId) root.chatProject = root.selectedProject;
+                            if (!root.chatId) root.chatProject = root.selectedProject === "__unfiled__" ? "" : root.selectedProject;
                         }
                     }
                     FButton {
-                        visible: root.selectedProject !== ""
-                        text: "Edit project instructions"; subtle: true; Layout.fillWidth: true; implicitHeight: 28
+                        visible: root.selectedProject !== "" && root.selectedProject !== "__unfiled__"
+                        text: "Edit folder"; subtle: true; Layout.fillWidth: true; implicitHeight: 28
                         onClicked: {
                             for (let p of root.projects) if (p.id === root.selectedProject) {
                                 projectDialog.editId=p.id; projectTitle.text=p.name; instructions.text=p.instructions;
@@ -277,7 +319,13 @@ ShellRoot {
                             }
                         }
                     }
-                    Text { text: "CONVERSATIONS"; font.pixelSize: 10; font.letterSpacing: 1.5; color: root.muted; topPadding: 8 }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 4
+                        FButton { text: "Active · " + root.activeCount; Layout.fillWidth: true; primary: !root.showArchived; implicitHeight: 30; implicitWidth: 80; font.pixelSize: 11; onClicked: root.setArchiveView(false) }
+                        FButton { text: "Archived · " + root.archivedCount; Layout.fillWidth: true; primary: root.showArchived; implicitHeight: 30; implicitWidth: 80; font.pixelSize: 11; onClicked: root.setArchiveView(true) }
+                    }
+                    Text { text: root.showArchived ? "ARCHIVED CONVERSATIONS" : "CONVERSATIONS"; font.pixelSize: 10; font.letterSpacing: 1.5; color: root.muted; topPadding: 8 }
                     ListView {
                         id: chatList
                         Layout.fillHeight: true
@@ -289,19 +337,37 @@ ShellRoot {
                         model: conversations
                         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                         delegate: ItemDelegate {
+                            id: conversationRow
+                            property alias actionButton: rowActions
                             required property string key
                             required property string title
+                            required property string project
+                            required property bool archived
                             required property int index
                             width: chatList.width
                             height: 38
                             enabled: !root.busy
                             hoverEnabled: true
+                            rightPadding: 36
                             contentItem: Text { text: title; color: root.chatId === key ? root.accent : Theme.fg; font.pixelSize: 13; elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter }
-                            background: Rectangle { radius: 6; color: root.chatId === key ? Theme.selectedChat : parent.hovered ? Theme.hover : "transparent" }
+                            background: Rectangle {
+                                radius: 6
+                                color: root.chatId === key ? Theme.selectedChat : conversationRow.hovered ? Theme.hover : "transparent"
+                                Behavior on color { enabled: Theme.effects; ColorAnimation { duration: 100 } }
+                            }
+                            FButton {
+                                id: rowActions
+                                anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                implicitWidth: 30; implicitHeight: 30; padding: 2
+                                text: "···"; subtle: true
+                                Accessible.name: "Actions for " + conversationRow.title
+                                onClicked: root.openChatActions(key,title,project,archived,rowActions)
+                            }
+                            TapHandler { acceptedButtons: Qt.RightButton; onTapped: root.openChatActions(key,title,project,archived,conversationRow) }
                             onClicked: { composer.text = ""; root.call({op:"load",chat:key}); }
                         }
                         footer: FButton { visible: root.moreChats; width: chatList.width; text: "Load more"; subtle: true; onClicked: { root.chatLimit += 60; root.refreshList(); } }
-                        Text { anchors.top: parent.top; anchors.topMargin: 10; width: parent.width; visible: conversations.count === 0; text: search.text ? "No matches found" : "Your conversations will appear here."; color: Theme.dim; font.pixelSize: 12; wrapMode: Text.WordWrap }
+                        Text { anchors.top: parent.top; anchors.topMargin: 10; width: parent.width; visible: conversations.count === 0; text: search.text ? "No matches found" : root.showArchived ? "No archived conversations in this folder." : "Your conversations will appear here."; color: Theme.dim; font.pixelSize: 12; wrapMode: Text.WordWrap }
                     }
                     Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
                     FButton { text: "Appearance"; subtle: true; Layout.fillWidth: true; onClicked: appearance.open() }
@@ -327,7 +393,7 @@ ShellRoot {
                         Layout.fillWidth: true
                         spacing: 3
                         Text { text: root.chatTitle; Layout.fillWidth: true; elide: Text.ElideRight; color: root.fg; font.pixelSize: 14; font.weight: Font.DemiBold }
-                        Text { text: root.chatProject ? root.projectName(root.chatProject) : "Your local workspace"; color: root.muted; font.pixelSize: 11 }
+                        Text { text: (root.chatArchived ? "Archived · " : "") + (root.chatId || root.chatProject ? root.projectName(root.chatProject) : "Your local workspace"); color: root.muted; font.pixelSize: 11 }
                     }
                     ComboBox {
                         id: modelPicker
@@ -341,15 +407,23 @@ ShellRoot {
                         palette.text: root.fg; palette.buttonText: root.fg; palette.button: Theme.panel; palette.base: Theme.panel; palette.window: Theme.panel; palette.highlight: Theme.selection
                         onActivated: { root.selectedModel=root.models[currentIndex].slug; root.call({op:"model",model:root.selectedModel}); }
                     }
-                    FButton { text: "···"; subtle: true; enabled: !!root.chatId && !root.busy; onClicked: chatMenu.popup() }
+                    FButton { id: headerActions; text: "···"; subtle: true; enabled: !!root.chatId && !root.busy; Accessible.name: "Conversation actions"; onClicked: root.openChatActions(root.chatId,root.chatTitle,root.chatProject,root.chatArchived,headerActions) }
                     Menu {
                         id: chatMenu
+                        popupType: Popup.Item
+                        enter: Transition { enabled: Theme.effects; NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 100 } }
+                        exit: Transition { enabled: Theme.effects; NumberAnimation { property: "opacity"; from: 1; to: 0; duration: 70 } }
                         palette.window: Theme.panel; palette.text: root.fg; palette.highlight: Theme.selection
-                        MenuItem { text: "Rename"; onTriggered: { renameField.text = root.chatTitle; renameDialog.open(); } }
-                        MenuItem { text: "Move to project"; onTriggered: moveDialog.open() }
-                        MenuItem { text: "Export as Markdown"; onTriggered: root.call({op:"export",chat:root.chatId}) }
+                        FMenuItem { text: "Rename"; onTriggered: { renameField.text = root.actionChatTitle; renameDialog.open(); } }
+                        FMenuItem { id: moveAction; text: "Move to folder…"; onTriggered: {
+                            movePicker.currentIndex = 0;
+                            for (let i=0;i<root.projects.length;i++) if (root.projects[i].id === root.actionChatProject) movePicker.currentIndex=i+1;
+                            moveDialog.open();
+                        } }
+                        FMenuItem { id: archiveAction; text: root.actionChatArchived ? "Restore from archive" : "Archive conversation"; onTriggered: root.call({op:"archive",chat:root.actionChatId,archived:!root.actionChatArchived}) }
+                        FMenuItem { text: "Export as Markdown"; onTriggered: root.call({op:"export",chat:root.actionChatId}) }
                         MenuSeparator {}
-                        MenuItem { text: "Delete conversation…"; onTriggered: deleteDialog.open() }
+                        FMenuItem { id: deleteAction; text: "Delete conversation…"; onTriggered: deleteDialog.open() }
                     }
                 }
                 Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
@@ -362,7 +436,19 @@ ShellRoot {
                         id: noticeRow
                         anchors.fill: parent; anchors.margins: 10
                         Text { text: root.banner; Layout.fillWidth: true; wrapMode: Text.WordWrap; color: root.bannerError ? Theme.errorText : root.accent; font.pixelSize: 12 }
-                        FButton { text: "×"; subtle: true; onClicked: root.banner = "" }
+                        FButton { visible: root.undoArchive !== null; text: "Undo"; subtle: true; enabled: !root.busy; onClicked: { let action=root.undoArchive; root.undoArchive=null; root.call({op:"archive",chat:action.chat,archived:action.archived}); } }
+                        FButton { text: "×"; subtle: true; onClicked: { root.banner = ""; root.undoArchive = null; } }
+                    }
+                }
+                Rectangle {
+                    visible: root.chatArchived
+                    Layout.fillWidth: true
+                    implicitHeight: 48
+                    color: Theme.selectedChat
+                    RowLayout {
+                        anchors.fill: parent; anchors.leftMargin: 16; anchors.rightMargin: 16
+                        Text { text: "Archived · Restore to continue this conversation"; color: Theme.fg; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
+                        FButton { text: "Restore"; subtle: true; enabled: !root.busy; onClicked: root.call({op:"archive",chat:root.chatId,archived:false}) }
                     }
                 }
                 Item {
@@ -387,10 +473,15 @@ ShellRoot {
                         Text { text: "A quiet place to think, write, and work."; color: root.muted; font.pixelSize: 14; width: parent.width; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap }
                         Item { width: 1; height: 6 }
                         FButton { visible: !root.connected; anchors.horizontalCenter: parent.horizontalCenter; text: "Continue with ChatGPT"; primary: true; onClicked: settings.open() }
-                        Text { text: "Conversations and projects are saved on this laptop.\nExisting ChatGPT history stays in ChatGPT."; color: Theme.dim; font.pixelSize: 12; width: parent.width; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap; lineHeight: 1.4 }
+                        Text { text: "Conversations and folders are saved on this laptop.\nExisting ChatGPT history stays in ChatGPT."; color: Theme.dim; font.pixelSize: 12; width: parent.width; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap; lineHeight: 1.4 }
                     }
                     ListView {
                         id: transcript
+                        SequentialAnimation {
+                            id: chatReveal
+                            PropertyAction { target: transcript; property: "opacity"; value: 0.65 }
+                            NumberAnimation { target: transcript; property: "opacity"; to: 1; duration: 120; easing.type: Easing.OutQuad }
+                        }
                         anchors.fill: parent
                         visible: messages.count > 0
                         clip: true
@@ -429,7 +520,7 @@ ShellRoot {
                                 spacing: 9
                                 Row {
                                     spacing: 10
-                                    Text { text: role === "user" ? "YOU" : "FEATHER"; color: role === "user" ? root.muted : root.accent; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 1.4 }
+                                    Text { text: role === "user" ? "YOU" : "FEATHERGPT"; color: role === "user" ? root.muted : root.accent; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 1.4 }
                                     Text { text: status === "streaming" ? (content ? "" : "Thinking…") : status === "stopped" ? "Stopped" : status === "interrupted" ? "Interrupted" : ""; color: Theme.muted; font.pixelSize: 10 }
                                 }
                                 TextEdit {
@@ -476,7 +567,7 @@ ShellRoot {
                                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                                 TextArea {
                                     id: composer
-                                    placeholderText: root.busy ? "Reply in progress…" : "Message Feather…"
+                                    placeholderText: root.chatArchived ? "Restore this conversation to reply" : root.busy ? "Reply in progress…" : "Message FeatherGPT…"
                                     placeholderTextColor: Theme.muted
                                     color: root.fg
                                     selectionColor: Theme.selection
@@ -485,8 +576,8 @@ ShellRoot {
                                     font.pixelSize: 14
                                     wrapMode: TextEdit.Wrap
                                     padding: 3
-                                    readOnly: root.busy
-                                    cursorDelegate: Rectangle { width: 1; height: composer.cursorRectangle.height; color: root.accent; visible: composer.activeFocus && !root.busy }
+                                    readOnly: root.busy || root.chatArchived
+                                    cursorDelegate: Rectangle { width: 1; height: composer.cursorRectangle.height; color: root.accent; visible: composer.activeFocus && !root.busy && !root.chatArchived }
                                     background: null
                                     selectByMouse: true
                                     Keys.onReturnPressed: event => {
@@ -503,7 +594,7 @@ ShellRoot {
                                 Layout.alignment: Qt.AlignBottom
                                 text: root.busy ? "Stop" : "↑"
                                 primary: !root.busy
-                                enabled: root.ready && !root.authBusy && (root.busy || composer.text.trim().length > 0)
+                                enabled: root.ready && !root.authBusy && !root.chatArchived && (root.busy || composer.text.trim().length > 0)
                                 onClicked: root.busy ? root.call({op:"stop"}) : root.send()
                                 ToolTip.visible: hovered
                                 ToolTip.text: root.busy ? "Stop reply · Esc" : "Send · Enter"
@@ -519,14 +610,14 @@ ShellRoot {
             }
         }
 
-        Popup {
+        FPopup {
             id: settings
             parent: surface
             anchors.centerIn: parent
             width: Math.min(490, win.width-32)
             height: Math.min(settingsContent.implicitHeight+40,win.height-32)
             modal: true; focus: true; padding: 20
-            background: Rectangle { color: Theme.popup; radius: 12; border.color: Theme.border }
+            background: FPanel {}
             ScrollView {
                 anchors.fill: parent; clip: true
                 contentWidth: availableWidth
@@ -568,7 +659,7 @@ ShellRoot {
                     }
                     Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
                     Text { text: "Made for a lighter desktop"; color: root.fg; font.pixelSize: 14; font.weight: Font.DemiBold }
-                    Text { text: "Native interface. No embedded browser. No background polling.\n\nHistory and projects live on this laptop and do not sync with ChatGPT. Only recent completed messages and project instructions are sent for context.\n\nFeather is an independent client, not an official OpenAI app."; color: root.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                    Text { text: "Native interface. No embedded browser. No background polling.\n\nHistory and folders live on this laptop and do not sync with ChatGPT. Only recent completed messages and folder instructions are sent for context.\n\nFeatherGPT is an independent client, not an official OpenAI app."; color: root.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.WordWrap }
                     FButton { text: "Manage ChatGPT usage and app access ↗"; subtle: true; Layout.fillWidth: true; onClicked: Qt.openUrlExternally("https://chatgpt.com/#settings") }
                 }
             }
@@ -576,19 +667,19 @@ ShellRoot {
 
         FileDialog {
             id: imagePicker
-            title: "Choose a Feather background"
+            title: "Choose a FeatherGPT background"
             nameFilters: ["Images (*.png *.jpg *.jpeg *.webp *.svg)"]
             fileMode: FileDialog.OpenFile
             onAccepted: root.call({op:"preferences",values:{background:"custom",image:selectedFile.toString()}})
         }
-        Popup {
+        FPopup {
             id: appearance
             parent: surface
             anchors.centerIn: parent
             width: Math.min(490,win.width-32)
             height: Math.min(615,win.height-32)
             modal: true; focus: true; padding: 20
-            background: Rectangle { color: Theme.popup; radius: 12; border.color: Theme.border }
+            background: FPanel {}
             ScrollView {
                 anchors.fill: parent; clip: true
                 contentWidth: availableWidth
@@ -600,6 +691,37 @@ ShellRoot {
                         Logo { Layout.preferredWidth: 35; Layout.preferredHeight: 35 }
                         Text { text: "Make it yours"; color: Theme.fg; font.pixelSize: 23; Layout.fillWidth: true }
                         FButton { text: "×"; subtle: true; onClicked: appearance.close() }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Text { text: "Gentle effects"; color: Theme.fg; font.pixelSize: 14 }
+                            Text { text: "Quick fades, button feedback and soft edges"; color: Theme.muted; font.pixelSize: 11; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                        }
+                        Switch {
+                            id: effectsSwitch
+                            checked: Theme.effects
+                            Accessible.name: "Gentle effects"
+                            implicitWidth: 48; implicitHeight: 28; padding: 2
+                            indicator: Rectangle {
+                                x: effectsSwitch.leftPadding
+                                y: effectsSwitch.topPadding + (effectsSwitch.availableHeight - height) / 2
+                                implicitWidth: 44; implicitHeight: 24
+                                radius: 12
+                                color: effectsSwitch.checked ? Theme.accent : Theme.border
+                                border.width: effectsSwitch.visualFocus ? 2 : 0
+                                border.color: Theme.fg
+                                Behavior on color { enabled: Theme.effects; ColorAnimation { duration: 90 } }
+                                Rectangle {
+                                    x: effectsSwitch.checked ? parent.width - width - 3 : 3
+                                    y: 3; width: 18; height: 18; radius: 9
+                                    color: Theme.popup
+                                    Behavior on x { enabled: Theme.effects; NumberAnimation { duration: 90 } }
+                                }
+                            }
+                            onToggled: { Theme.effects=checked; root.saveAppearance(); }
+                        }
                     }
                     Text { text: "THEME"; color: Theme.muted; font.pixelSize: 10; font.letterSpacing: 1.4 }
                     GridLayout {
@@ -709,63 +831,84 @@ ShellRoot {
             }
         }
 
-        Popup {
+        FPopup {
             id: projectDialog
             property string editId: ""
             parent: surface; anchors.centerIn: parent
             width: Math.min(480,win.width-32); height: Math.min(415,win.height-32)
             padding: 20; modal: true; focus: true
-            background: Rectangle { color: Theme.popup; radius: 12; border.color: Theme.border }
+            background: FPanel {}
             ColumnLayout {
                 anchors.fill: parent; spacing: 14
-                Text { text: projectDialog.editId ? "Edit project" : "New project"; color: root.fg; font.pixelSize: 22 }
-                FField { id: projectTitle; placeholderText: "Project name"; Layout.fillWidth: true; maximumLength: 80 }
-                Text { text: "Instructions for conversations in this project"; color: root.muted; font.pixelSize: 12 }
+                Text { text: projectDialog.editId ? "Edit folder" : "New folder"; color: root.fg; font.pixelSize: 22 }
+                FField { id: projectTitle; placeholderText: "Folder name"; Layout.fillWidth: true; maximumLength: 80 }
+                Text { text: "Optional instructions for conversations in this folder"; color: root.muted; font.pixelSize: 12 }
                 ScrollView {
                     Layout.fillWidth: true; Layout.fillHeight: true; clip: true
-                    TextArea { id: instructions; placeholderText: "What should Feather know about this project?"; wrapMode: TextEdit.Wrap; color: root.fg; placeholderTextColor: Theme.muted; font.pixelSize: 13; padding: 10; background: Rectangle { color: Theme.field; radius: 7; border.color: Theme.border } }
+                    TextArea { id: instructions; placeholderText: "What should FeatherGPT know about this folder?"; wrapMode: TextEdit.Wrap; color: root.fg; placeholderTextColor: Theme.muted; font.pixelSize: 13; padding: 10; background: Rectangle { color: Theme.field; radius: 7; border.color: Theme.border } }
                 }
                 RowLayout {
+                    FButton { id: removeFolderButton; text: "Remove folder…"; visible: !!projectDialog.editId; subtle: true; enabled: !root.busy; onClicked: { folderDeleteDialog.folderId=projectDialog.editId; folderDeleteDialog.folderName=projectTitle.text; projectDialog.close(); folderDeleteDialog.open(); } }
                     Item { Layout.fillWidth: true }
                     FButton { text: "Cancel"; subtle: true; onClicked: projectDialog.close() }
-                    FButton { text: "Save project"; primary: true; enabled: projectTitle.text.trim().length>0; onClicked: { root.call({op:"project",id:projectDialog.editId,name:projectTitle.text,instructions:instructions.text}); projectDialog.close(); } }
+                    FButton { text: "Save folder"; primary: true; enabled: projectTitle.text.trim().length>0; onClicked: { root.call({op:"project",id:projectDialog.editId,name:projectTitle.text,instructions:instructions.text}); projectDialog.close(); } }
                 }
             }
         }
-        Popup {
+        FPopup {
             id: renameDialog
             parent: surface; anchors.centerIn: parent; width: Math.min(420,win.width-32); height: 165
             padding: 20; modal: true; focus: true
-            background: Rectangle { color: Theme.popup; radius: 12; border.color: Theme.border }
+            background: FPanel {}
             ColumnLayout {
                 anchors.fill: parent; spacing: 12
                 Text { text: "Rename conversation"; color: root.fg; font.pixelSize: 19 }
-                FField { id: renameField; Layout.fillWidth: true; maximumLength: 100; onAccepted: { if (text.trim()) { root.call({op:"rename",chat:root.chatId,title:text}); renameDialog.close(); } } }
-                FButton { text: "Save"; primary: true; Layout.alignment: Qt.AlignRight; enabled: renameField.text.trim().length>0; onClicked: { root.call({op:"rename",chat:root.chatId,title:renameField.text}); renameDialog.close(); } }
+                FField { id: renameField; Layout.fillWidth: true; maximumLength: 100; onAccepted: { if (text.trim()) { root.call({op:"rename",chat:root.actionChatId,title:text}); renameDialog.close(); } } }
+                FButton { text: "Save"; primary: true; Layout.alignment: Qt.AlignRight; enabled: renameField.text.trim().length>0; onClicked: { root.call({op:"rename",chat:root.actionChatId,title:renameField.text}); renameDialog.close(); } }
             }
         }
-        Popup {
+        FPopup {
             id: moveDialog
             parent: surface; anchors.centerIn: parent; width: Math.min(420,win.width-32); height: 180
             padding: 20; modal: true; focus: true
-            background: Rectangle { color: Theme.popup; radius: 12; border.color: Theme.border }
+            background: FPanel {}
             ColumnLayout {
                 anchors.fill: parent; spacing: 12
                 Text { text: "Move conversation"; color: root.fg; font.pixelSize: 19 }
-                ComboBox { id: movePicker; Layout.fillWidth: true; model: [{id:"",name:"No project"}].concat(root.projects); textRole: "name"; palette.text: root.fg; palette.buttonText: root.fg; palette.button: Theme.panel; palette.base: Theme.panel; palette.window: Theme.panel; palette.highlight: Theme.selection }
-                FButton { text: "Move"; primary: true; Layout.alignment: Qt.AlignRight; onClicked: { root.call({op:"move",chat:root.chatId,project:movePicker.model[movePicker.currentIndex].id}); moveDialog.close(); } }
+                ComboBox { id: movePicker; Layout.fillWidth: true; model: [{id:"",name:"Unfiled"}].concat(root.projects); textRole: "name"; palette.text: root.fg; palette.buttonText: root.fg; palette.button: Theme.panel; palette.base: Theme.panel; palette.window: Theme.panel; palette.highlight: Theme.selection }
+                FButton { id: confirmMoveButton; text: "Move"; primary: true; Layout.alignment: Qt.AlignRight; onClicked: { root.call({op:"move",chat:root.actionChatId,project:movePicker.model[movePicker.currentIndex].id}); moveDialog.close(); } }
             }
         }
-        Popup {
+        FPopup {
             id: deleteDialog
-            parent: surface; anchors.centerIn: parent; width: Math.min(420,win.width-32); height: 165
+            parent: surface; anchors.centerIn: parent; width: Math.min(440,win.width-32); height: 195
             padding: 20; modal: true; focus: true
-            background: Rectangle { color: Theme.popup; radius: 12; border.color: Theme.border }
+            background: FPanel {}
             ColumnLayout {
                 anchors.fill: parent; spacing: 12
                 Text { text: "Delete this conversation?"; color: root.fg; font.pixelSize: 19 }
-                Text { text: "This removes its messages from local history."; color: root.muted; font.pixelSize: 12 }
-                RowLayout { Layout.alignment: Qt.AlignRight; FButton { text: "Cancel"; onClicked: deleteDialog.close() } FButton { text: "Delete"; onClicked: { root.call({op:"delete",chat:root.chatId}); deleteDialog.close(); } } }
+                Text { text: root.actionChatTitle; color: Theme.muted; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
+                Text { text: "This permanently removes its messages from this laptop."; color: root.muted; font.pixelSize: 12 }
+                RowLayout { Layout.alignment: Qt.AlignRight; FButton { id: cancelDeleteButton; text: "Cancel"; onClicked: deleteDialog.close() } FButton { id: confirmDeleteButton; text: "Delete"; onClicked: { root.call({op:"delete",chat:root.actionChatId}); deleteDialog.close(); } } }
+            }
+        }
+        FPopup {
+            id: folderDeleteDialog
+            property string folderId: ""
+            property string folderName: ""
+            parent: surface; anchors.centerIn: parent
+            width: Math.min(440,win.width-32); height: 210
+            padding: 20; modal: true; focus: true
+            ColumnLayout {
+                anchors.fill: parent; spacing: 12
+                Text { text: "Remove this folder?"; color: Theme.fg; font.pixelSize: 20 }
+                Text { text: folderDeleteDialog.folderName; color: Theme.muted; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true }
+                Text { text: "Its conversations will move to Unfiled. No conversations or messages will be deleted."; color: Theme.muted; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                RowLayout {
+                    Layout.alignment: Qt.AlignRight
+                    FButton { text: "Cancel"; onClicked: folderDeleteDialog.close() }
+                    FButton { id: confirmFolderDeleteButton; text: "Remove folder"; onClicked: { root.call({op:"delete_project",id:folderDeleteDialog.folderId}); folderDeleteDialog.close(); } }
+                }
             }
         }
         } // surface

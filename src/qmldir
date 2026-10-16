@@ -3,3 +3,6 @@ FButton 1.0 FButton.qml
 FField 1.0 FField.qml
 Logo 1.0 Logo.qml
 Backdrop 1.0 Backdrop.qml
+FPanel 1.0 FPanel.qml
+FPopup 1.0 FPopup.qml
+FMenuItem 1.0 FMenuItem.qml

@@ -36,7 +36,7 @@ with tempfile.TemporaryDirectory(prefix='feather-bench-') as tmp:
     temp=Path(tmp)
     store=Store(temp/'data')
     with store.db:
-        store.db.executemany('INSERT INTO chats VALUES(?,?,NULL,?)',[(str(i),f'Conversation {i}',i) for i in range(5000)])
+        store.db.executemany('INSERT INTO chats(id,title,project_id,updated) VALUES(?,?,NULL,?)',[(str(i),f'Conversation {i}',i) for i in range(5000)])
         store.db.executemany("INSERT INTO messages(chat_id,role,content) VALUES(?,'user',?)",[(str(i//4),f'Laptop research message {i}') for i in range(20000)])
     def median_ms(fn):
         samples=[]

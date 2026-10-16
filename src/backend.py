@@ -22,18 +22,20 @@ import urllib.parse
 import urllib.request
 import uuid
 
-APP = 'Feather Chat'
+APP = 'FeatherGPT'
 AUTH = 'https://auth.openai.com'
 API = 'https://api.openai.com/v1'
 RESOURCE = API
 SCOPES = 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct'
-DEFAULT_PREFERENCES = {'theme':'forest','background':'none','image':'','fit':'crop','strength':18}
+DEFAULT_PREFERENCES = {'theme':'forest','background':'none','image':'','fit':'crop','strength':18,'effects':True}
 
 
 def validate_preferences(values, current=None, check_image=True):
     if not isinstance(values, dict) or set(values) - set(DEFAULT_PREFERENCES):
         raise RuntimeError('The appearance settings were invalid.')
     result = {**DEFAULT_PREFERENCES, **(current or {}), **values}
+    if type(result['effects']) is not bool:
+        raise RuntimeError('Effects must be enabled or disabled.')
     if result['theme'] not in ('forest','midnight','plum','paper'):
         raise RuntimeError('Choose an available theme.')
     if result['background'] not in ('none','contours','grid','horizon','custom'):
@@ -176,6 +178,11 @@ class Store:
             DELETE FROM search WHERE rowid=old.id;
             INSERT INTO search(rowid,content,chat_id) VALUES(new.id,new.content,new.chat_id); END;
         ''')
+        # Additive migration: existing conversations and folder membership stay intact.
+        if 'archived' not in {row['name'] for row in self.db.execute('PRAGMA table_info(chats)')}:
+            self.db.execute('ALTER TABLE chats ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1))')
+        self.db.execute('CREATE INDEX IF NOT EXISTS chats_archive_updated ON chats(archived,updated DESC)')
+        self.db.execute('CREATE INDEX IF NOT EXISTS chats_folder_archive ON chats(project_id,archived,updated DESC)')
         # A killed app must not turn a partial reply into completed context on restart.
         self.db.execute("UPDATE messages SET status='interrupted' WHERE status='streaming'")
         self.db.commit()
@@ -191,12 +198,14 @@ class Store:
 
     def chat(self, project=None):
         key = uuid.uuid4().hex
-        self.write('INSERT INTO chats VALUES(?,?,?,?)', (key,'New conversation',project or None,time.time()))
+        self.write('INSERT INTO chats(id,title,project_id,updated) VALUES(?,?,?,?)', (key,'New conversation',project or None,time.time()))
         return key
 
-    def listing(self, query='', project='', limit=60):
-        where, params = [], []
-        if project:
+    def listing(self, query='', project='', limit=60, archived=False):
+        where, params = ['archived=?'], [int(archived)]
+        if project == '__unfiled__':
+            where.append('project_id IS NULL')
+        elif project:
             where.append('project_id=?')
             params.append(project)
         if query.strip():
@@ -210,6 +219,14 @@ class Store:
                 params.append('%'+query+'%')
         sql = 'SELECT * FROM chats' + (' WHERE '+' AND '.join(where) if where else '')
         return self.rows(sql+' ORDER BY updated DESC LIMIT ?', (*params, min(int(limit),10000)))
+
+    def counts(self, project=''):
+        where, params = '', ()
+        if project == '__unfiled__':
+            where = ' WHERE project_id IS NULL'
+        elif project:
+            where, params = ' WHERE project_id=?', (project,)
+        return self.rows('SELECT COALESCE(SUM(archived=0),0) AS active, COALESCE(SUM(archived=1),0) AS archived FROM chats'+where,params)[0]
 
     def messages(self, chat, before=0, limit=40):
         rows = self.rows('SELECT * FROM messages WHERE chat_id=? AND id<? ORDER BY id DESC LIMIT ?', (chat, before or 2**63-1,limit+1))
@@ -253,6 +270,7 @@ class Service:
         self.model = ''
         self.last_query = ''
         self.last_project = ''
+        self.last_archived = False
         self.list_limit = 60
 
     def output(self, event, **fields):
@@ -270,8 +288,8 @@ class Service:
         self.emit('account', connected=bool(account.get('access_token')), label=account.get('email',''), plan_enabled='chatgpt.tokens.use.direct' in account.get('scopes',[]), accounts=[{'id':k, 'label':v.get('email','Account')+' · '+k[-6:], 'connected':bool(v.get('access_token'))} for k,v in self.accounts['accounts'].items()], active=self.accounts.get('active',''))
 
     def listing(self):
-        rows = self.store.listing(self.last_query, self.last_project, self.list_limit+1)
-        self.emit('chats', rows=rows[:self.list_limit], more=len(rows)>self.list_limit)
+        rows = self.store.listing(self.last_query, self.last_project, self.list_limit+1, self.last_archived)
+        self.emit('chats', rows=rows[:self.list_limit], more=len(rows)>self.list_limit, counts=self.store.counts(self.last_project))
         self.emit('projects', rows=self.store.rows('SELECT * FROM projects ORDER BY name COLLATE NOCASE'))
 
     def load(self, chat, before=0):
@@ -340,7 +358,7 @@ class Service:
                 handler.send_header('Cache-Control','no-store')
                 handler.send_header('Content-Security-Policy',"default-src 'none'; style-src 'unsafe-inline'")
                 handler.end_headers()
-                handler.wfile.write(('<html><body style="background:#171a19;color:#e8eee9;font:20px sans-serif;padding:64px"><h1>Feather Chat</h1>'+('Return to Feather to finish connecting. You can close this tab.' if valid else 'Invalid sign-in callback. Return to Feather and try again.')+'</body></html>').encode())
+                handler.wfile.write(('<html><body style="background:#171a19;color:#e8eee9;font:20px sans-serif;padding:64px"><h1>FeatherGPT</h1>'+('Return to FeatherGPT to finish connecting. You can close this tab.' if valid else 'Invalid sign-in callback. Return to Feather and try again.')+'</body></html>').encode())
                 if valid and result.empty():
                     result.put_nowait(params)
         try:
@@ -439,9 +457,12 @@ class Service:
         if not self.account().get('access_token'):
             raise RuntimeError('Sign in before sending a message.')
         if not chat:
-            chat = self.store.chat(self.last_project)
-        if not self.store.rows('SELECT id FROM chats WHERE id=?', (chat,)):
+            chat = self.store.chat(None if self.last_project == '__unfiled__' else self.last_project)
+        info = self.store.rows('SELECT archived FROM chats WHERE id=?', (chat,))
+        if not info:
             raise RuntimeError('Conversation no longer exists.')
+        if info[0]['archived']:
+            raise RuntimeError('Restore this conversation from the archive before sending a message.')
         self.store.write('INSERT INTO messages(chat_id,role,content) VALUES(?,?,?)',(chat,'user',text.strip()))
         self.store.write("UPDATE chats SET title=CASE WHEN title='New conversation' THEN ? ELSE title END,updated=? WHERE id=?", (' '.join(text.split())[:70],time.time(),chat))
         mid = self.store.write("INSERT INTO messages(chat_id,role,content,status) VALUES(?,'assistant','','streaming')",(chat,))
@@ -550,6 +571,9 @@ class Service:
         elif op == 'list':
             self.last_query = str(req.get('query',''))[:200]
             self.last_project = req.get('project','')
+            if type(req.get('archived',False)) is not bool:
+                raise RuntimeError('Choose Active or Archived conversations.')
+            self.last_archived = req.get('archived',False)
             self.list_limit = min(max(60,int(req.get('limit',60))),10000)
             self.listing()
         elif op == 'load':
@@ -597,24 +621,48 @@ class Service:
         elif op == 'project':
             name = str(req.get('name','')).strip()[:80]
             if not name:
-                raise RuntimeError('Give the project a name.')
+                raise RuntimeError('Give the folder a name.')
             key = req.get('id') or uuid.uuid4().hex
             self.store.write('INSERT INTO projects VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,instructions=excluded.instructions',(key,name,str(req.get('instructions',''))[:12000]))
             self.listing()
-            self.emit('notice',message='Project saved.')
-        elif op in ('rename','move','delete'):
+            self.emit('notice',message='Folder saved.')
+        elif op == 'delete_project':
+            if self.active_job:
+                raise RuntimeError('Finish or stop the current reply before removing a folder.')
+            project = req['id']
+            if not self.store.rows('SELECT id FROM projects WHERE id=?',(project,)):
+                raise RuntimeError('Folder no longer exists.')
+            self.store.write('DELETE FROM projects WHERE id=?',(project,))
+            if self.last_project == project:
+                self.last_project = ''
+            self.emit('folder_deleted',id=project)
+            self.listing()
+            self.emit('notice',message='Folder removed. Its conversations are now Unfiled.')
+        elif op in ('rename','move','delete','archive'):
             chat = req['chat']
             if self.active_job and self.active_job['chat']==chat:
                 raise RuntimeError('Stop the reply before changing this conversation.')
-            if op == 'rename':
+            info = self.store.rows('SELECT title,archived FROM chats WHERE id=?',(chat,))
+            if not info:
+                raise RuntimeError('Conversation no longer exists.')
+            if op == 'archive':
+                archived = req.get('archived',True)
+                if type(archived) is not bool:
+                    raise RuntimeError('Choose Archive or Restore for this conversation.')
+                self.store.write('UPDATE chats SET archived=? WHERE id=?',(int(archived),chat))
+                self.emit('archived',chat=chat,archived=archived,title=info[0]['title'])
+            elif op == 'rename':
                 title = str(req.get('title','')).strip()[:100]
                 if not title:
                     raise RuntimeError('Enter a conversation title.')
                 self.store.write('UPDATE chats SET title=? WHERE id=?',(title,chat))
-                self.load(chat)
+                self.emit('renamed',chat=chat,title=title)
             elif op == 'move':
-                self.store.write('UPDATE chats SET project_id=? WHERE id=?',(req.get('project') or None,chat))
-                self.load(chat)
+                project = req.get('project') or None
+                if project and not self.store.rows('SELECT id FROM projects WHERE id=?',(project,)):
+                    raise RuntimeError('Choose an existing folder, or Unfiled.')
+                self.store.write('UPDATE chats SET project_id=? WHERE id=?',(project,chat))
+                self.emit('moved',chat=chat,project=project or '')
             else:
                 self.store.write('DELETE FROM chats WHERE id=?',(chat,))
                 self.emit('deleted',chat=chat)

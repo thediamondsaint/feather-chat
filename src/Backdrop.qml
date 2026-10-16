@@ -9,7 +9,7 @@ Item {
     readonly property int imageStatus: artwork.status
     signal failed()
     clip: true
-    Rectangle { anchors.fill: parent; color: Theme.bg }
+    Rectangle { anchors.fill: parent; color: Theme.bg; Behavior on color { enabled: Theme.effects; ColorAnimation { duration: 140 } } }
     Rectangle {
         anchors.fill: parent
         visible: backdrop.style === "horizon"

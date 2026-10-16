@@ -2,6 +2,7 @@ pragma Singleton
 import QtQuick
 
 QtObject {
+    property bool effects: true
     property string themeId: "forest"
     readonly property var choices: [
         { id: "forest", name: "Forest", bg: "#191e1b", sidebar: "#141916", panel: "#222b25", field: "#191f1b", border: "#354039", strongBorder: "#6d957b", fg: "#e5ece6", muted: "#95a298", dim: "#7e9083", accent: "#a4d6b6", accentText: "#14251e", accentPressed: "#79b493", hover: "#2c3530", pressed: "#354139", selection: "#476952", selectedChat: "#26362c", popup: "#1d2620", errorBg: "#392720", errorText: "#f4c5ae" },

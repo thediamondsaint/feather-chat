@@ -17,7 +17,7 @@ if gh repo view "$repository" --json isPrivate >/dev/null 2>&1; then
         exit 1
     fi
 else
-    gh repo create "$repository" --public --description 'A lightweight native ChatGPT client for Omarchy and Hyprland, built with Quickshell.'
+    gh repo create "$repository" --public --description 'FeatherGPT: a lightweight native ChatGPT client for Omarchy and Hyprland.'
 fi
 if [[ $(git remote get-url origin) != https://github.com/thediamondsaint/feather-chat.git ]]; then
     printf '%s\n' 'Unexpected origin URL; nothing has been pushed.' >&2

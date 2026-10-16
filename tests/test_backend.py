@@ -234,16 +234,16 @@ class PreferencesTests(unittest.TestCase):
     def tearDown(self):
         self.service.store.db.close(); self.temp.cleanup()
     def test_persist_restart_partial_update_and_reset(self):
-        self.service.dispatch({'op':'preferences','values':{'theme':'paper','background':'grid','strength':30}})
+        self.service.dispatch({'op':'preferences','values':{'theme':'paper','background':'grid','strength':30,'effects':False}})
         self.service.dispatch({'op':'preferences','values':{'fit':'fit'}})
         second=b.Service(self.temp.name,lambda *args,**kw:None)
-        self.assertEqual(second.preferences,{'theme':'paper','background':'grid','image':'','fit':'fit','strength':30})
+        self.assertEqual(second.preferences,{'theme':'paper','background':'grid','image':'','fit':'fit','strength':30,'effects':False})
         second.store.db.close()
         self.service.dispatch({'op':'preferences','reset':True})
         self.assertEqual(self.service.preferences,b.DEFAULT_PREFERENCES)
         self.assertNotIn('access_token',self.service.preferences_path.read_text())
     def test_reject_invalid_values_without_changing_preferences(self):
-        for values in ({'theme':'unknown'},{'strength':36},{'strength':True},{'background':'video'},{'image':'https://example.com/a.png'},{'image':'file://remote/a.png'},{'fit':'unknown'},{'access_token':'oops'},{'background':'custom'}):
+        for values in ({'effects':'yes'},{'theme':'unknown'},{'strength':36},{'strength':True},{'background':'video'},{'image':'https://example.com/a.png'},{'image':'file://remote/a.png'},{'fit':'unknown'},{'access_token':'oops'},{'background':'custom'}):
             with self.subTest(values=values),self.assertRaises(RuntimeError):
                 self.service.dispatch({'op':'preferences','values':values})
         self.assertEqual(self.service.preferences,b.DEFAULT_PREFERENCES)
@@ -265,6 +265,107 @@ class PreferencesTests(unittest.TestCase):
         second=b.Service(self.temp.name,lambda *args,**kw:None)
         self.assertEqual(second.preferences,b.DEFAULT_PREFERENCES)
         second.store.db.close()
+
+
+class OrganizationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory()
+        self.events=[]
+        self.service=b.Service(self.temp.name,lambda event,**kw:self.events.append({'event':event,**kw}))
+        self.store=self.service.store
+        self.store.write("INSERT INTO projects VALUES('p','Work','Use short answers')")
+        self.chat=self.store.chat('p')
+        self.store.write("INSERT INTO messages(chat_id,role,content) VALUES(?,'user','Find my pineapple notes')",(self.chat,))
+    def tearDown(self):
+        self.store.db.close(); self.temp.cleanup()
+    def test_archive_search_scope_counts_restore_and_restart(self):
+        self.service.dispatch({'op':'archive','chat':self.chat})
+        self.assertEqual(self.store.listing('pineapple'),[])
+        self.assertEqual(self.store.listing('pineapple',project='p',archived=True)[0]['id'],self.chat)
+        self.assertEqual(self.store.counts('p'),{'active':0,'archived':1})
+        self.assertEqual(self.store.counts('__unfiled__'),{'active':0,'archived':0})
+        second=b.Store(self.temp.name)
+        self.assertEqual(second.listing(archived=True)[0]['id'],self.chat)
+        second.db.close()
+        self.service.dispatch({'op':'archive','chat':self.chat,'archived':False})
+        self.assertEqual(len(self.store.listing('pineapple')),1)
+        self.assertEqual(self.store.counts(),{'active':1,'archived':0})
+    def test_folder_removal_preserves_active_and_archived_messages(self):
+        other=self.store.chat('p')
+        self.store.write("INSERT INTO messages(chat_id,role,content) VALUES(?,'user','Other notes')",(other,))
+        self.service.dispatch({'op':'archive','chat':other})
+        self.service.last_project='p'
+        self.service.dispatch({'op':'delete_project','id':'p'})
+        self.assertEqual(self.service.last_project,'')
+        self.assertEqual(self.store.rows('SELECT project_id FROM chats'),[{'project_id':None},{'project_id':None}])
+        self.assertEqual(self.store.counts('__unfiled__'),{'active':1,'archived':1})
+        self.assertEqual(len(self.store.rows('SELECT * FROM messages')),2)
+        self.assertEqual(len(self.store.listing('pineapple',project='__unfiled__')),1)
+    def test_move_rename_and_delete_target_an_unopened_row(self):
+        other=self.store.chat()
+        self.service.dispatch({'op':'move','chat':self.chat,'project':''})
+        self.service.dispatch({'op':'rename','chat':self.chat,'title':'Notes'})
+        self.assertFalse(any(e['event']=='messages' for e in self.events))
+        self.service.dispatch({'op':'archive','chat':self.chat})
+        self.service.dispatch({'op':'delete','chat':self.chat})
+        self.assertEqual(self.store.rows('SELECT * FROM messages WHERE chat_id=?',(self.chat,)),[])
+        self.assertEqual(self.store.listing('pineapple',archived=True),[])
+        self.assertEqual(self.store.listing()[0]['id'],other)
+    def test_archive_and_folder_changes_cannot_disrupt_stream(self):
+        self.service.active_job={'chat':self.chat}
+        for req in ({'op':'archive','chat':self.chat},{'op':'delete','chat':self.chat},{'op':'delete_project','id':'p'}):
+            with self.subTest(req=req),self.assertRaises(RuntimeError): self.service.dispatch(req)
+        self.assertEqual(self.store.counts(),{'active':1,'archived':0})
+    def test_archived_chat_rejects_send_without_appending_or_network(self):
+        self.service.models=[{'slug':'test-model','name':'Test'}]
+        self.service.accounts['active']='test'
+        self.service.accounts['accounts']['test']={'access_token':'not-a-real-token'}
+        self.service.dispatch({'op':'archive','chat':self.chat})
+        with patch.object(self.service,'spawn') as spawn, self.assertRaisesRegex(RuntimeError,'Restore'):
+            self.service.send(self.chat,'new message','test-model')
+        spawn.assert_not_called()
+        self.assertEqual(len(self.store.rows('SELECT * FROM messages')),1)
+    def test_unfiled_new_chat_and_invalid_move(self):
+        self.service.models=[{'slug':'test-model','name':'Test'}]
+        self.service.accounts['active']='test'
+        self.service.accounts['accounts']['test']={'access_token':'not-a-real-token'}
+        self.service.last_project='__unfiled__'
+        with patch.object(self.service,'spawn'):
+            self.service.send('','new message','test-model')
+        self.assertEqual(len(self.store.listing(project='__unfiled__')),1)
+        self.assertIsNone(self.store.listing(project='__unfiled__')[0]['project_id'])
+        with self.assertRaisesRegex(RuntimeError,'existing folder'):
+            self.service.dispatch({'op':'move','chat':self.chat,'project':'missing'})
+    def test_legacy_preferences_get_default_effects(self):
+        self.service.preferences_path.write_text(json.dumps({'theme':'midnight','background':'none','image':'','fit':'crop','strength':18}))
+        second=b.Service(self.temp.name,lambda *args,**kw:None)
+        self.assertTrue(second.preferences['effects'])
+        self.assertEqual(second.preferences['theme'],'midnight')
+        second.store.db.close()
+
+
+class MigrationTests(unittest.TestCase):
+    def test_old_database_migrates_without_losing_history_or_folders(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=sqlite3.connect(Path(folder)/'history.sqlite3')
+            db.executescript("""
+                CREATE TABLE projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,instructions TEXT NOT NULL DEFAULT '');
+                CREATE TABLE chats(id TEXT PRIMARY KEY,title TEXT NOT NULL,project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,updated REAL NOT NULL);
+                CREATE TABLE messages(id INTEGER PRIMARY KEY,chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,role TEXT NOT NULL,content TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'complete');
+                INSERT INTO projects VALUES('p','Legacy folder','Keep these instructions');
+                INSERT INTO chats VALUES('c','Legacy conversation','p',1);
+                INSERT INTO messages VALUES(1,'c','user','Keep this message','complete');
+            """)
+            db.close()
+            store=b.Store(folder)
+            self.assertEqual(store.listing()[0]['archived'],0)
+            self.assertEqual(store.listing()[0]['project_id'],'p')
+            self.assertEqual(store.context('c')[0]['content'],'Keep this message')
+            store.db.close()
+            second=b.Store(folder)
+            self.assertEqual(second.counts(),{'active':1,'archived':0})
+            self.assertEqual(second.rows('SELECT instructions FROM projects')[0]['instructions'],'Keep these instructions')
+            second.db.close()
 
 
 if __name__ == "__main__": unittest.main()
