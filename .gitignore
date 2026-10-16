@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.sqlite3*
+accounts.json
+preferences.json
+exports/
+*.log
+.env
+.env.*
+/*.png

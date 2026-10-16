@@ -1,0 +1,12 @@
+{
+  "history_fixture": {
+    "conversations": 5000,
+    "messages": 20000
+  },
+  "history_list_median_ms": 0.22,
+  "history_search_median_ms": 42.46,
+  "startup_ready_ms": 540.4,
+  "combined_idle_rss_mib": 114.2,
+  "idle_cpu_percent_one_core": 0.0,
+  "conditions": "Offscreen Qt software renderer; warm filesystem cache; frontend plus Python service; 5000 conversations/20000 messages. Live Wayland and authenticated model latency were not measured."
+}

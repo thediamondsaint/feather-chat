@@ -1,0 +1,5 @@
+singleton Theme 1.0 Theme.qml
+FButton 1.0 FButton.qml
+FField 1.0 FField.qml
+Logo 1.0 Logo.qml
+Backdrop 1.0 Backdrop.qml
