@@ -4,7 +4,7 @@
 
 A small native chat client for Omarchy, Hyprland and Quickshell. Built for a Pentium Silver N5030 laptop with 4 GB of RAM. Independent software; not an official OpenAI application.
 
-![FeatherGPT with the Midnight theme](previews/theme-midnight.png)
+![FeatherGPT on Omarchy — demo conversations](previews/FeatherGPT-Omarchy.png)
 
 ## Install
 
@@ -129,6 +129,16 @@ QT_QUICK_CONTROLS_STYLE=Basic QT_QPA_PLATFORMTHEME=generic qs -p src
 ```
 
 Set `FEATHER_DATA_DIR` for an isolated development database. Do not run development and installed instances against the same credentials at the same time: refreshing one OAuth session must be serialized.
+
+## Screenshot for sharing
+
+[Download the FeatherGPT screenshot](previews/FeatherGPT-Omarchy.png). This is a render of the actual app with isolated demo conversations; it does not show a connected account or read your real history.
+
+Regenerate it with:
+
+```sh
+python scripts/screenshot.py
+```
 
 ## GitHub publishing
 
