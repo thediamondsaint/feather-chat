@@ -134,11 +134,15 @@ QT_QUICK_CONTROLS_STYLE=Basic QT_QPA_PLATFORMTHEME=generic qs -p src
 
 Set `FEATHER_DATA_DIR` for an isolated development database. Do not run development and installed instances against the same credentials at the same time: refreshing one OAuth session must be serialized.
 
-## Screenshot for sharing
+## Screenshots for sharing
 
-[Download the FeatherGPT screenshot](previews/FeatherGPT-Omarchy.png). This is a render of the actual app with isolated demo conversations; it does not show a connected account or read your real history.
+[Main preview](previews/FeatherGPT-Omarchy.png) · [Quick profile switching](previews/FeatherGPT-Profiles.png) · [Forest](previews/FeatherGPT-Forest.png) · [Plum](previews/FeatherGPT-Plum.png) · [Paper](previews/FeatherGPT-Paper.png)
 
-Regenerate it with:
+![Quick profile switching](previews/FeatherGPT-Profiles.png)
+
+These are renders of the actual app with isolated demo conversations and synthetic signed-out profiles. They do not read your real history or accounts.
+
+Regenerate the sharing previews with:
 
 ```sh
 python scripts/screenshot.py
