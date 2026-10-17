@@ -23,8 +23,8 @@ with tempfile.TemporaryDirectory(prefix='feather-ui-') as tmp:
     for role,content in [('user','How can I make this laptop feel faster?'),('assistant','## Keep it simple\n\nA few small changes make a useful difference:\n\n- Keep only the apps you need open.\n- Prefer native tools for everyday work.\n- Load long histories in small batches.\n\n```bash\nfree -m\n```\n\nYour conversations are saved locally, so you can pick up where you left off.')]:
         store.write('INSERT INTO messages(chat_id,role,content) VALUES(?,?,?)',(chat,role,content))
     store.db.close()
-    previews=project/'previews'
-    previews.mkdir(exist_ok=True)
+    previews=Path(os.environ.get('FEATHER_PREVIEW_DIR') or project/'previews')
+    previews.mkdir(parents=True,exist_ok=True)
     snippet='''
     Timer {
         property int stage: 0

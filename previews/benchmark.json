@@ -4,9 +4,9 @@
     "messages": 20000
   },
   "history_list_median_ms": 0.27,
-  "history_search_median_ms": 39.84,
-  "startup_ready_ms": 483.7,
-  "combined_idle_rss_mib": 112.4,
-  "idle_cpu_percent_one_core": 0.0,
+  "history_search_median_ms": 40.16,
+  "startup_ready_ms": 488.1,
+  "combined_idle_rss_mib": 112.5,
+  "idle_cpu_percent_one_core": 0.5,
   "conditions": "Offscreen Qt software renderer; warm filesystem cache; frontend plus Python service; 5000 conversations/20000 messages. Live Wayland and authenticated model latency were not measured."
 }

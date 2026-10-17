@@ -63,7 +63,7 @@ Custom images must be smaller than 50 MB. Images are loaded asynchronously with 
 
 ## Features
 
-- Streamed text, selectable Markdown replies, copy and stop.
+- Streamed text, selectable Markdown replies, copy and stop. The view stays at the newest reply as it grows, including Markdown reflow and window resizing. Scrolling up pauses following; **↓ Latest** or scrolling back to the end resumes it.
 - Local SQLite history with full-text search and pagination.
 - Folders with saved instructions; move, rename, archive and restore conversations.
 - Markdown export and explicit confirmation before deleting a conversation.
@@ -83,11 +83,11 @@ Measured in the restricted build environment with a warm filesystem cache, offsc
 
 | Measurement | Result |
 |---|---:|
-| UI and backend ready, excluding launcher | 484 ms |
-| Combined idle resident memory | 112.4 MiB |
-| Idle CPU, two-second sample, one-core basis | 0.0% |
+| UI and backend ready, excluding launcher | 488 ms |
+| Combined idle resident memory | 112.5 MiB |
+| Idle CPU, two-second sample, one-core basis | 0.5% |
 | History listing, median of 30 calls | 0.27 ms |
-| Broad full-text history search, median of 30 calls | 39.84 ms |
+| Broad full-text history search, median of 30 calls | 40.16 ms |
 
 These are development measurements, not a guarantee for a live Wayland session, cold startup, every conversation size or server response latency. See [raw benchmark](previews/benchmark.json). Network and model processing determine how quickly replies arrive.
 
@@ -116,11 +116,14 @@ From this directory:
 ```sh
 python -m unittest discover -s tests -v
 python tests/ui_smoke.py
+python tests/scroll_regression.py
 python tests/benchmark.py
 python install.py
 ```
 
 The UI smoke test runs real Quickshell offscreen with isolated temporary data, exercises service initialization, projects, search, history loading, simulated stream rendering, draft preservation, all four themes, local backgrounds, the image-picker callback and preference reset, plus archive/restore, row menus, folder removal, cancelled/confirmed deletion and reduced effects, and writes screenshots to `previews/`. In a socket-restricted environment, Quickshell's IPC-server warning is expected; it does not prevent offscreen interface tests. Real single-instance activation and live Wayland rendering require a desktop session.
+
+The scroll regression uses Qt Quick Test (test dependency only) to send real wheel and scrollbar input to the app. It also covers a reply taller than the viewport, changing window/composer sizes, final Markdown layout, older message pages and switching conversations. Set `FEATHER_PREVIEW_DIR` when running the UI smoke test to write preview images outside the repository.
 
 To run source directly from a desktop terminal:
 

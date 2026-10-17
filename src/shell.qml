@@ -34,6 +34,7 @@ ShellRoot {
     property bool moreChats: false
     property int chatLimit: 60
     property bool pendingSend: false
+    property bool followLatest: true
     property string banner: ""
     property bool bannerError: false
     property var models: []
@@ -113,6 +114,7 @@ ShellRoot {
     }
     function newChat() {
         if (busy) return;
+        followLatest = true;
         chatId = "";
         chatTitle = "New conversation";
         chatProject = selectedProject === "__unfiled__" ? "" : selectedProject;
@@ -130,7 +132,29 @@ ShellRoot {
         pendingSend = true;
         call({op:"send", chat:chatId, text:composer.text, model:selectedModel});
     }
-    function bottom() { Qt.callLater(function() { transcript.positionViewAtEnd(); }); }
+    function nearLatest() {
+        return transcript.atYEnd || transcript.originY + transcript.contentHeight + transcript.bottomMargin - transcript.contentY - transcript.height <= 3;
+    }
+    function pinLatest() {
+        if (!followLatest || transcript.moving || transcriptScroll.pressed) return;
+        // Flush delegate geometry before positioning: streamed text and Markdown
+        // can change height after the model event has already been delivered.
+        transcript.forceLayout();
+        transcript.positionViewAtEnd();
+        // ListView can align the last delegate while leaving bottomMargin
+        // unscrolled. Include that space so atYEnd remains true after layout.
+        transcript.contentY = Math.max(transcript.originY - transcript.topMargin,
+            transcript.originY + transcript.contentHeight + transcript.bottomMargin - transcript.height);
+    }
+    function scheduleLatest() {
+        // A stable callback is coalesced by Qt; no polling or scroll animation.
+        if (followLatest) Qt.callLater(pinLatest);
+    }
+    function bottom() {
+        transcript.cancelFlick();
+        followLatest = true;
+        scheduleLatest();
+    }
     function receive(e) {
         switch (e.event) {
         case "preferences": applyAppearance(e.values); break;
@@ -159,6 +183,7 @@ ShellRoot {
             break;
         case "messages":
             if (e.prepend && e.chat !== chatId) break;
+            followLatest = !e.prepend;
             let changedChat = chatId !== e.chat;
             chatId = e.chat; chatTitle = e.info.title; chatProject = e.info.project_id || "";
             chatArchived = !!e.info.archived;
@@ -178,17 +203,15 @@ ShellRoot {
             break;
         case "delta":
             if (e.chat !== chatId) break;
-            let follow = transcript.atYEnd;
             for (let i=messages.count-1; i>=0; i--) if (messages.get(i).key === e.id) {
                 messages.setProperty(i,"content",messages.get(i).content+e.text); break;
             }
-            if (follow) bottom();
+            scheduleLatest();
             break;
         case "finished":
             if (e.chat === chatId) for (let i=messages.count-1; i>=0; i--) if (messages.get(i).key === e.id) {
-                let follow = transcript.atYEnd;
                 messages.setProperty(i,"status",e.status);
-                if (follow) bottom();
+                scheduleLatest();
                 break;
             }
             break;
@@ -491,7 +514,29 @@ ShellRoot {
                         spacing: 20
                         topMargin: 24
                         bottomMargin: 24
-                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                        boundsBehavior: Flickable.StopAtBounds
+                        onMovementStarted: root.followLatest = false
+                        onMovementEnded: {
+                            if (!transcriptScroll.pressed) {
+                                root.followLatest = root.nearLatest();
+                                root.scheduleLatest();
+                            }
+                        }
+                        onContentHeightChanged: root.scheduleLatest()
+                        onOriginYChanged: root.scheduleLatest()
+                        onHeightChanged: root.scheduleLatest()
+                        onWidthChanged: root.scheduleLatest()
+                        ScrollBar.vertical: ScrollBar {
+                            id: transcriptScroll
+                            policy: ScrollBar.AsNeeded
+                            onPressedChanged: {
+                                if (pressed) root.followLatest = false;
+                                else {
+                                    root.followLatest = root.nearLatest();
+                                    root.scheduleLatest();
+                                }
+                            }
+                        }
                         header: Item {
                             width: transcript.width
                             height: root.olderMessages ? 52 : 0
@@ -505,6 +550,7 @@ ShellRoot {
                             required property string status
                             width: transcript.width
                             height: messageColumn.implicitHeight
+                            onHeightChanged: root.scheduleLatest()
                             Rectangle {
                                 anchors.fill: messageColumn
                                 anchors.margins: -10
@@ -543,7 +589,7 @@ ShellRoot {
                             }
                         }
                     }
-                    FButton { visible: messages.count > 0 && !transcript.atYEnd; anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 16; text: "↓ Latest"; onClicked: root.bottom() }
+                    FButton { id: latestButton; visible: messages.count > 0 && !root.followLatest; anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 16; text: "↓ Latest"; onClicked: root.bottom() }
                 }
                 ColumnLayout {
                     Layout.fillWidth: true
