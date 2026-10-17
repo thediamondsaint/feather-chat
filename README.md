@@ -68,6 +68,7 @@ Custom images must be smaller than 50 MB. Images are loaded asynchronously with 
 - Folders with saved instructions; move, rename, archive and restore conversations.
 - Markdown export and explicit confirmation before deleting a conversation.
 - Browser-based ChatGPT sign-in with PKCE, state and nonce checks, RSA signature verification, multiple account registrations, token renewal and sign-out.
+- Fast profile switching from the sidebar or **Ctrl Shift P**. **Ctrl Tab** / **Ctrl Shift Tab** cycle saved accounts. Each profile remembers its model and cached catalog, with refresh in the background. Drafts and the open conversation stay in place; switching is disabled during replies or sign-in.
 - Keyboard shortcuts: **Ctrl N** new conversation, **Ctrl K** history search, **Ctrl B** sidebar, **Ctrl ,** account, **Esc** stop reply, **Ctrl Q** quit. **Enter** sends, **Shift Enter** inserts a new line.
 - Reopening the launcher focuses the existing instance. Closing the last window quits the app and its backend. Nothing autostarts.
 
@@ -121,7 +122,7 @@ python tests/benchmark.py
 python install.py
 ```
 
-The UI smoke test runs real Quickshell offscreen with isolated temporary data, exercises service initialization, projects, search, history loading, simulated stream rendering, draft preservation, all four themes, local backgrounds, the image-picker callback and preference reset, plus archive/restore, row menus, folder removal, cancelled/confirmed deletion and reduced effects, and writes screenshots to `previews/`. In a socket-restricted environment, Quickshell's IPC-server warning is expected; it does not prevent offscreen interface tests. Real single-instance activation and live Wayland rendering require a desktop session.
+The UI smoke test runs real Quickshell offscreen with isolated temporary data, exercises service initialization, projects, search, history loading, simulated stream rendering, draft preservation, all four themes, local backgrounds, the image-picker callback and preference reset, plus archive/restore, row menus, folder removal, cancelled/confirmed deletion, reduced effects and profile switching, and writes screenshots to `previews/`. In a socket-restricted environment, Quickshell's IPC-server warning is expected; it does not prevent offscreen interface tests. Real single-instance activation and live Wayland rendering require a desktop session.
 
 The scroll regression uses Qt Quick Test (test dependency only) to send real wheel and scrollbar input to the app. It also covers a reply taller than the viewport, changing window/composer sizes, final Markdown layout, older message pages and switching conversations. Set `FEATHER_PREVIEW_DIR` when running the UI smoke test to write preview images outside the repository.
 

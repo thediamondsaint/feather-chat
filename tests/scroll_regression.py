@@ -138,8 +138,12 @@ with tempfile.TemporaryDirectory(prefix='feathergpt-scroll-') as folder:
            'QT_QUICK_CONTROLS_STYLE': 'Basic', 'QT_QUICK_BACKEND': 'software'}
     env.pop('DISPLAY', None)
     env.pop('WAYLAND_DISPLAY', None)
-    result = subprocess.run(['qs', '-p', str(temp/'src'), '--no-color'], env=env,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=20)
+    try:
+        result = subprocess.run(['qs', '-p', str(temp/'src'), '--no-color'], env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=20)
+    except subprocess.TimeoutExpired as exc:
+        print((exc.stdout or b'').decode(errors='replace'))
+        raise
     print(result.stdout)
     if result.returncode or 'SCROLL_SUCCESS' not in result.stdout or any(s in result.stdout for s in ('SCROLL_FAILURE', 'ReferenceError', 'TypeError', 'FAIL!')):
         raise SystemExit(1)

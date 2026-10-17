@@ -250,6 +250,8 @@ class Service:
         self.emit = emit or self.output
         self.output_lock = threading.Lock()
         self.auth_lock = threading.RLock()
+        self.state_lock = threading.RLock()
+        self.discovering = set()
         self.preferences_path = self.folder/'preferences.json'
         try:
             self.preferences = validate_preferences(json.loads(self.preferences_path.read_text()), check_image=False)
@@ -278,7 +280,8 @@ class Service:
             print(json.dumps({'event':event, **fields}, ensure_ascii=False), flush=True)
 
     def save_accounts(self):
-        atomic_json(self.creds_path, self.accounts)
+        with self.state_lock:
+            atomic_json(self.creds_path, self.accounts)
 
     def account(self):
         return self.accounts['accounts'].get(self.accounts.get('active'), {})
@@ -307,9 +310,9 @@ class Service:
                 self.emit('error', message=str(exc)[:500] if isinstance(exc, RuntimeError) else 'The operation failed. Please try again.')
         threading.Thread(target=work, daemon=True).start()
 
-    def token(self):
+    def token(self, account_id=None):
         with self.auth_lock:
-            account = self.account()
+            account = self.accounts['accounts'].get(account_id, {}) if account_id is not None else self.account()
             if not account.get('access_token'):
                 raise RuntimeError('Choose Continue with ChatGPT to connect your account first.')
             if 'chatgpt.tokens.use.direct' not in account.get('scopes', []):
@@ -318,27 +321,65 @@ class Service:
                 if not account.get('refresh_token'):
                     raise RuntimeError('Your session has expired. Please sign in again.')
                 tokens = request_json(AUTH+'/api/accounts/oauth/token', {'grant_type':'refresh_token','client_id':account['client_id'],'refresh_token':account['refresh_token'],'resource':RESOURCE}, form=True)
-                account.update({k:v for k,v in tokens.items() if k in ('access_token','refresh_token','id_token')})
-                account['expires_at'] = time.time()+tokens.get('expires_in',3600)
-                if 'scope' in tokens:
-                    account['scopes'] = tokens['scope'].split()
-                self.save_accounts()
-                if 'chatgpt.tokens.use.direct' not in account['scopes']:
-                    raise RuntimeError('ChatGPT plan access is no longer enabled. Please sign in again.')
+                with self.state_lock:
+                    account.update({k:v for k,v in tokens.items() if k in ('access_token','refresh_token','id_token')})
+                    account['expires_at'] = time.time()+tokens.get('expires_in',3600)
+                    if 'scope' in tokens:
+                        account['scopes'] = tokens['scope'].split()
+                    self.save_accounts()
+                    if 'chatgpt.tokens.use.direct' not in account['scopes']:
+                        raise RuntimeError('ChatGPT plan access is no longer enabled. Please sign in again.')
             return account['access_token']
 
-    def discover(self):
-        generation = self.auth_generation
-        data = request_json(API+'/models', token=self.token())
-        rows = [{'slug':m['slug'],'name':m.get('display_name',m['slug'])} for m in data.get('models',[]) if m.get('visibility')=='list']
-        if not rows:
-            raise RuntimeError('No eligible models were returned for this ChatGPT account.')
-        if generation != self.auth_generation:
-            return
+    def cached_models(self):
+        account = self.account()
+        rows = account.get('models', []) if account.get('access_token') and 'chatgpt.tokens.use.direct' in account.get('scopes', []) else []
         self.models = rows
-        preferred = self.account().get('model','')
-        self.model = preferred if preferred in [r['slug'] for r in rows] else rows[0]['slug']
+        preferred = account.get('model', '')
+        self.model = preferred if preferred in [r['slug'] for r in rows] else (rows[0]['slug'] if rows else '')
         self.emit('models', rows=rows, selected=self.model)
+
+    def refresh_models(self):
+        # Capture the registration before queuing work. Repeated switches never
+        # create duplicate catalog requests for the same session generation.
+        with self.state_lock:
+            key = (self.accounts.get('active', ''), self.auth_generation)
+            if any(k[0] == key[0] for k in self.discovering):
+                return
+            self.discovering.add(key)
+        self.spawn(self.discover, *key)
+
+    def discover(self, account_id=None, generation=None):
+        account_id = self.accounts.get('active', '') if account_id is None else account_id
+        generation = self.auth_generation if generation is None else generation
+        def current():
+            return generation == self.auth_generation and account_id == self.accounts.get('active')
+        try:
+            if not current():
+                return
+            data = request_json(API+'/models', token=self.token(account_id))
+            rows = [{'slug':m['slug'],'name':m.get('display_name',m['slug'])} for m in data.get('models',[]) if m.get('visibility')=='list']
+            if not rows:
+                raise RuntimeError('No eligible models were returned for this ChatGPT account.')
+            with self.state_lock:
+                if not current():
+                    return
+                self.account()['models'] = rows
+                self.cached_models()
+                self.save_accounts()
+        except Exception as exc:
+            # A slow response or failure from the previous profile must never
+            # replace the new profile's picker or display a misleading error.
+            with self.state_lock:
+                if current():
+                    self.emit('error', message=str(exc)[:500] if isinstance(exc, RuntimeError) else 'The operation failed. Please try again.')
+        finally:
+            with self.state_lock:
+                self.discovering.discard((account_id, generation))
+                # A -> B -> A while A is still loading needs a fresh request;
+                # the old generation was deliberately prevented from updating UI.
+                if account_id == self.accounts.get('active') and generation != self.auth_generation and not self.account_busy and self.account().get('access_token'):
+                    self.refresh_models()
 
     def login(self, new=False):
         self.login_cancel.clear()
@@ -408,6 +449,7 @@ class Service:
                 self.auth_generation += 1
                 self.save_accounts()
             self.state()
+            self.cached_models()
             if 'chatgpt.tokens.use.direct' in account['scopes']:
                 self.discover()
         finally:
@@ -559,10 +601,11 @@ class Service:
         if op == 'init':
             self.emit('preferences',values=self.preferences)
             self.state()
+            self.cached_models()
             self.listing()
             self.emit('ready')
             if self.account().get('access_token'):
-                self.spawn(self.discover)
+                self.refresh_models()
         elif op == 'preferences':
             updated = dict(DEFAULT_PREFERENCES) if req.get('reset') else validate_preferences(req.get('values',{}),self.preferences)
             atomic_json(self.preferences_path,updated)
@@ -592,13 +635,13 @@ class Service:
             self.login_cancel.set()
         elif op == 'models':
             if not self.account_busy:
-                self.spawn(self.discover)
+                self.refresh_models()
         elif op == 'model':
             value = req['model']
             if value in [m['slug'] for m in self.models]:
-                self.model = value
-                self.account()['model'] = value
-                with self.auth_lock:
+                with self.state_lock:
+                    self.model = value
+                    self.account()['model'] = value
                     self.save_accounts()
         elif op in ('switch','signout'):
             if self.active_job or self.account_busy:
@@ -610,14 +653,17 @@ class Service:
             else:
                 if req['id'] not in self.accounts['accounts']:
                     raise RuntimeError('Unknown account.')
-                self.accounts['active'] = req['id']
-                self.auth_generation += 1
-                self.models, self.model = [], ''
-                self.save_accounts()
-                self.state()
-                self.emit('models',rows=[],selected='')
+                with self.state_lock:
+                    if req['id'] == self.accounts.get('active'):
+                        self.state()
+                        return
+                    self.accounts['active'] = req['id']
+                    self.auth_generation += 1
+                    self.save_accounts()
+                    self.state()
+                    self.cached_models()
                 if self.account().get('access_token'):
-                    self.spawn(self.discover)
+                    self.refresh_models()
         elif op == 'project':
             name = str(req.get('name','')).strip()[:80]
             if not name:

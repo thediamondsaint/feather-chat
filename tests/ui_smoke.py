@@ -23,6 +23,11 @@ with tempfile.TemporaryDirectory(prefix='feather-ui-') as tmp:
     for role,content in [('user','How can I make this laptop feel faster?'),('assistant','## Keep it simple\n\nA few small changes make a useful difference:\n\n- Keep only the apps you need open.\n- Prefer native tools for everyday work.\n- Load long histories in small batches.\n\n```bash\nfree -m\n```\n\nYour conversations are saved locally, so you can pick up where you left off.')]:
         store.write('INSERT INTO messages(chat_id,role,content) VALUES(?,?,?)',(chat,role,content))
     store.db.close()
+    # Saved signed-out registrations exercise real switching without networking.
+    (temp/'data/accounts.json').write_text(json.dumps(dict(active='profile-a', host='test-host', accounts={
+        'profile-a': dict(client_id='profile-a', email='personal@example.test'),
+        'profile-b': dict(client_id='profile-b', email='work@example.test'),
+    })))
     previews=Path(os.environ.get('FEATHER_PREVIEW_DIR') or project/'previews')
     previews.mkdir(parents=True,exist_ok=True)
     snippet='''
@@ -171,7 +176,28 @@ with tempfile.TemporaryDirectory(prefix='feather-ui-') as tmp:
             } else if (stage === 45) {
                 check(appearance.opacity === 1,"popup faded out with reduced effects");
                 check(!chatReveal.running,"chat fade did not stop");
-                console.log("TEST_SUCCESS history, themes, backgrounds, row menus, archive, restore, folders, unfiled, safe folder removal, confirmed delete, cancel delete, reduced effects");
+                appearance.close();
+                composer.text="Keep this draft";
+                profileButton.clicked(); stage++;
+            } else if (stage === 46) {
+                check(profiles.visible,"profile picker did not open");
+                check(profileRepeater.count === 2,"saved profiles missing");
+                capture("profiles");
+            } else if (stage === 47) {
+                profileRepeater.itemAt(1).clicked();
+                check(root.profileSwitchPending,"switch should guard sending until backend confirms");
+                stage++;
+            } else if (stage === 48 && root.activeAccount === "profile-b" && !root.profileSwitchPending) {
+                check(composer.text === "Keep this draft","profile switch lost draft");
+                check(root.models.length === 0 && root.selectedModel === "","signed-out profile retained models");
+                check(accountPicker.currentIndex === 1,"settings picker out of sync");
+                root.cycleProfile(-1); stage++;
+            } else if (stage === 49 && root.activeAccount === "profile-a" && !root.profileSwitchPending) {
+                check(accountPicker.currentIndex === 0,"reverse switch out of sync");
+                root.pendingSend=true; root.cycleProfile(1);
+                check(!root.profileSwitchPending,"switched while a send was pending");
+                root.pendingSend=false;
+                console.log("TEST_SUCCESS profile picker, account switching, draft preservation, guards, history, themes, backgrounds, row menus, archive, restore, folders, unfiled, safe folder removal, confirmed delete, cancel delete, reduced effects");
                 Qt.quit();
             }
         }

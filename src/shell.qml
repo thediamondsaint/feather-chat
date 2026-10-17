@@ -28,6 +28,8 @@ ShellRoot {
     property bool planEnabled: false
     property bool busy: false
     property bool authBusy: false
+    property bool profileSwitchPending: false
+    readonly property bool canSwitchProfile: ready && !busy && !authBusy && !pendingSend && !profileSwitchPending
     property bool ready: false
     property bool sidebarVisible: true
     property bool olderMessages: false
@@ -71,6 +73,21 @@ ShellRoot {
 
     function call(value) {
         if (backend.running) backend.write(JSON.stringify(value) + "\n");
+    }
+    function profileLabel() {
+        for (let account of accounts) if (account.id === activeAccount) return account.label;
+        return "Connect ChatGPT";
+    }
+    function switchProfile(id) {
+        if (!canSwitchProfile || id === activeAccount) return;
+        profileSwitchPending = true;
+        banner = "";
+        call({op:"switch", id:id});
+    }
+    function cycleProfile(direction) {
+        if (!canSwitchProfile || accounts.length < 2) return;
+        let index = accounts.findIndex(function(account) { return account.id === activeAccount; });
+        switchProfile(accounts[(index + direction + accounts.length) % accounts.length].id);
     }
     function saveAppearance() {
         appearanceSaving = true;
@@ -126,7 +143,7 @@ ShellRoot {
         composer.forceActiveFocus();
     }
     function send() {
-        if (busy || pendingSend || chatArchived || !composer.text.trim()) return;
+        if (busy || pendingSend || authBusy || profileSwitchPending || chatArchived || !composer.text.trim()) return;
         if (!connected || !planEnabled) { settings.open(); return; }
         if (!selectedModel) { notify("Refresh the models in Account settings before sending.", true); return; }
         pendingSend = true;
@@ -165,7 +182,8 @@ ShellRoot {
             for (let i=0; i<accounts.length; i++) if (accounts[i].id === activeAccount) accountPicker.currentIndex=i;
             break;
         case "models":
-            models = e.rows; selectedModel = e.selected;
+            models = e.rows; selectedModel = e.selected; profileSwitchPending = false;
+            modelPicker.currentIndex = -1;
             for (let i=0; i<models.length; i++) if (models[i].slug === e.selected) modelPicker.currentIndex = i;
             break;
         case "chats":
@@ -217,7 +235,7 @@ ShellRoot {
             break;
         case "auth_busy": authBusy = e.busy; break;
         case "notice": notify(e.message, false); break;
-        case "error": pendingSend = false; appearanceSaving = false; notify(e.message, true); break;
+        case "error": profileSwitchPending = false; pendingSend = false; appearanceSaving = false; notify(e.message, true); break;
         case "archived":
             if (chatId === e.chat) chatArchived = e.archived;
             notify(e.archived ? "Conversation archived." : "Conversation restored.", false);
@@ -273,6 +291,9 @@ ShellRoot {
         Shortcut { sequence: "Ctrl+B"; onActivated: root.sidebarVisible = !root.sidebarVisible }
         Shortcut { sequence: "Ctrl+comma"; onActivated: settings.open() }
         Shortcut { sequence: "Ctrl+Shift+comma"; onActivated: appearance.open() }
+        Shortcut { sequence: "Ctrl+Shift+P"; enabled: root.canSwitchProfile; onActivated: profiles.open() }
+        Shortcut { sequence: "Ctrl+Tab"; enabled: root.canSwitchProfile && root.accounts.length > 1; onActivated: root.cycleProfile(1) }
+        Shortcut { sequence: "Ctrl+Shift+Tab"; enabled: root.canSwitchProfile && root.accounts.length > 1; onActivated: root.cycleProfile(-1) }
         Shortcut { sequence: "Ctrl+Q"; onActivated: Qt.quit() }
         Shortcut { sequence: "Escape"; enabled: root.busy; onActivated: root.call({op:"stop"}) }
 
@@ -395,10 +416,14 @@ ShellRoot {
                     Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
                     FButton { text: "Appearance"; subtle: true; Layout.fillWidth: true; onClicked: appearance.open() }
                     FButton {
-                        text: root.connected ? "●   " + root.accountLabel : "○   Connect ChatGPT"
+                        id: profileButton
+                        Layout.minimumWidth: 0
+                        text: (root.connected ? "●   " : "○   ") + root.profileLabel() + "   ▾"
+                        Accessible.name: "Switch profile"
+                        enabled: root.canSwitchProfile
                         Layout.fillWidth: true
                         subtle: true
-                        onClicked: settings.open()
+                        onClicked: { if (root.accounts.length) profiles.open(); else settings.open(); }
                     }
                 }
             }
@@ -425,7 +450,7 @@ ShellRoot {
                         model: root.models
                         textRole: "name"
                         displayText: root.models.length ? currentText : "Choose model"
-                        enabled: !root.busy && root.models.length > 0
+                        enabled: !root.busy && !root.profileSwitchPending && !root.authBusy && root.models.length > 0
                         font.pixelSize: 12
                         palette.text: root.fg; palette.buttonText: root.fg; palette.button: Theme.panel; palette.base: Theme.panel; palette.window: Theme.panel; palette.highlight: Theme.selection
                         onActivated: { root.selectedModel=root.models[currentIndex].slug; root.call({op:"model",model:root.selectedModel}); }
@@ -640,7 +665,7 @@ ShellRoot {
                                 Layout.alignment: Qt.AlignBottom
                                 text: root.busy ? "Stop" : "↑"
                                 primary: !root.busy
-                                enabled: root.ready && !root.authBusy && !root.chatArchived && (root.busy || composer.text.trim().length > 0)
+                                enabled: root.ready && !root.authBusy && !root.profileSwitchPending && !root.chatArchived && (root.busy || composer.text.trim().length > 0)
                                 onClicked: root.busy ? root.call({op:"stop"}) : root.send()
                                 ToolTip.visible: hovered
                                 ToolTip.text: root.busy ? "Stop reply · Esc" : "Send · Enter"
@@ -683,14 +708,14 @@ ShellRoot {
                         Layout.fillWidth: true
                         model: root.accounts; textRole: "label"
                         palette.text: root.fg; palette.buttonText: root.fg; palette.button: Theme.panel; palette.base: Theme.panel; palette.window: Theme.panel; palette.highlight: Theme.selection
-                        enabled: !root.busy && !root.authBusy
-                        onActivated: root.call({op:"switch",id:root.accounts[currentIndex].id})
+                        enabled: root.canSwitchProfile
+                        onActivated: root.switchProfile(root.accounts[currentIndex].id)
                         Component.onCompleted: { for (let i=0;i<root.accounts.length;i++) if (root.accounts[i].id === root.activeAccount) currentIndex=i; }
                     }
                     Text { visible: root.connected; text: root.accountLabel + (root.planEnabled ? "\nChatGPT plan access enabled" : "\nChatGPT plan access has not been granted"); color: root.accent; font.pixelSize: 13; Layout.fillWidth: true; wrapMode: Text.WordWrap }
                     FButton {
                         text: root.authBusy ? "Waiting for browser…" : "Continue with ChatGPT"
-                        primary: true; Layout.fillWidth: true; enabled: !root.authBusy && !root.busy
+                        primary: true; Layout.fillWidth: true; enabled: root.canSwitchProfile
                         onClicked: { root.banner=""; root.call({op:"login"}); }
                     }
                     Text { visible: root.authBusy; text: "Finish signing in in your browser, then return here."; color: root.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.WordWrap }
@@ -699,14 +724,59 @@ ShellRoot {
                     RowLayout {
                         visible: !root.authBusy
                         Layout.fillWidth: true
-                        FButton { text: "Add account"; enabled: !root.busy; onClicked: root.call({op:"login",new:true}) }
+                        FButton { text: "Add account"; enabled: root.canSwitchProfile; onClicked: root.call({op:"login",new:true}) }
                         FButton { text: "Refresh models"; enabled: root.connected && !root.busy; onClicked: root.call({op:"models"}) }
-                        FButton { text: "Sign out"; enabled: root.connected && !root.busy; onClicked: root.call({op:"signout"}) }
+                        FButton { text: "Sign out"; enabled: root.connected && root.canSwitchProfile; onClicked: root.call({op:"signout"}) }
                     }
                     Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.border }
                     Text { text: "Made for a lighter desktop"; color: root.fg; font.pixelSize: 14; font.weight: Font.DemiBold }
                     Text { text: "Native interface. No embedded browser. No background polling.\n\nHistory and folders live on this laptop and do not sync with ChatGPT. Only recent completed messages and folder instructions are sent for context.\n\nFeatherGPT is an independent client, not an official OpenAI app."; color: root.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.WordWrap }
                     FButton { text: "Manage ChatGPT usage and app access ↗"; subtle: true; Layout.fillWidth: true; onClicked: Qt.openUrlExternally("https://chatgpt.com/#settings") }
+                }
+            }
+        }
+
+        FPopup {
+            id: profiles
+            parent: surface
+            anchors.centerIn: parent
+            width: Math.min(420, win.width - 32)
+            contentItem: ColumnLayout {
+                spacing: 10
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text { text: "Switch profile"; color: root.fg; font.pixelSize: 22; Layout.fillWidth: true }
+                    FButton { text: "×"; subtle: true; onClicked: profiles.close() }
+                }
+                Text { text: "Ctrl Tab / Ctrl Shift Tab to cycle profiles"; color: root.muted; font.pixelSize: 12 }
+                ScrollView {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Math.min(profileRows.implicitHeight, 260)
+                    clip: true
+                    contentWidth: availableWidth
+                    ColumnLayout {
+                        id: profileRows
+                        width: parent.width
+                        spacing: 4
+                        Repeater {
+                            id: profileRepeater
+                            model: root.accounts
+                            FButton {
+                                required property var modelData
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                text: (modelData.id === root.activeAccount ? "●   " : "○   ") + modelData.label + (modelData.connected ? "" : " · Signed out")
+                                subtle: modelData.id !== root.activeAccount
+                                enabled: root.canSwitchProfile
+                                onClicked: { root.switchProfile(modelData.id); profiles.close(); }
+                            }
+                        }
+                    }
+                }
+                Text { text: "Conversations and folders are shared on this laptop."; color: root.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                RowLayout {
+                    FButton { text: "Add account"; enabled: root.canSwitchProfile; onClicked: { profiles.close(); settings.open(); root.call({op:"login",new:true}); } }
+                    FButton { text: "Account settings"; onClicked: { profiles.close(); settings.open(); } }
                 }
             }
         }

@@ -368,4 +368,136 @@ class MigrationTests(unittest.TestCase):
             second.db.close()
 
 
+class ProfileTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.events = []
+        self.service = b.Service(self.temp.name, lambda event, **kw: self.events.append(dict(event=event, **kw)))
+        self.service.accounts['active'] = 'a'
+        for key in ('a', 'b'):
+            self.service.accounts['accounts'][key] = dict(client_id=key, email='same@example.test',
+                access_token='fake-'+key, refresh_token='refresh-'+key, expires_at=time.time()+1000,
+                scopes=['chatgpt.tokens.use.direct'], models=[dict(slug=key, name=key)], model=key)
+        self.service.cached_models()
+        self.events.clear()
+
+    def tearDown(self):
+        self.service.store.db.close()
+        self.temp.cleanup()
+
+    def test_switch_restores_catalog_and_model_before_network(self):
+        with patch.object(self.service, 'spawn') as spawn:
+            self.service.dispatch(dict(op='switch', id='b'))
+            self.assertEqual(self.service.model, 'b')
+            self.assertEqual([e['event'] for e in self.events], ['account', 'models'])
+            self.assertEqual(self.events[0]['active'], 'b')
+            self.assertNotEqual(self.events[0]['accounts'][0]['label'], self.events[0]['accounts'][1]['label'])
+            self.assertNotIn('fake-', json.dumps(self.events))
+            spawn.assert_called_once_with(self.service.discover, 'b', 1)
+        restored = b.Service(self.temp.name, lambda *args, **kw: None)
+        restored.cached_models()
+        self.assertEqual(restored.model, 'b')
+        restored.store.db.close()
+
+    def test_profile_preference_and_scope_isolation(self):
+        with patch.object(self.service, 'spawn'):
+            self.service.account()['models'].append(dict(slug='a2', name='a2'))
+            self.service.cached_models()
+            self.service.dispatch(dict(op='model', model='a2'))
+            self.service.dispatch(dict(op='switch', id='b'))
+            self.assertEqual(self.service.model, 'b')
+            self.service.dispatch(dict(op='switch', id='a'))
+            self.assertEqual(self.service.model, 'a2')
+            self.service.accounts['accounts']['b']['scopes'] = []
+            self.service.dispatch(dict(op='switch', id='b'))
+            self.assertEqual(self.service.models, [])
+            self.assertEqual(self.service.model, '')
+
+    def test_switch_guards_and_same_profile_noop(self):
+        with patch.object(self.service, 'spawn') as spawn:
+            self.service.dispatch(dict(op='switch', id='a'))
+            spawn.assert_not_called()
+            self.assertEqual(self.service.auth_generation, 0)
+            for field in ('active_job', 'account_busy'):
+                setattr(self.service, field, True)
+                with self.assertRaises(RuntimeError): self.service.dispatch(dict(op='switch', id='b'))
+                setattr(self.service, field, None if field == 'active_job' else False)
+            with self.assertRaises(RuntimeError): self.service.dispatch(dict(op='switch', id='missing'))
+
+    def test_slow_old_catalog_and_error_never_replace_new_profile(self):
+        for fails in (False, True):
+            with self.subTest(fails=fails):
+                self.service.accounts['active'] = 'a'
+                self.service.auth_generation += 1
+                entered, release = threading.Event(), threading.Event()
+                def request(*args, **kw):
+                    self.assertEqual(kw['token'], 'fake-a')
+                    entered.set()
+                    if not release.wait(3): raise RuntimeError('test timed out')
+                    if fails: raise RuntimeError('old profile failure')
+                    return dict(models=[dict(slug='stale', visibility='list')])
+                with patch.object(b, 'request_json', side_effect=request), patch.object(self.service, 'spawn'):
+                    worker = threading.Thread(target=self.service.discover)
+                    worker.start()
+                    try:
+                        self.assertTrue(entered.wait(2))
+                        self.service.dispatch(dict(op='switch', id='b'))
+                        self.events.clear()
+                    finally:
+                        release.set()
+                        worker.join(3)
+                    self.assertFalse(worker.is_alive())
+                    self.assertEqual(self.service.model, 'b')
+                    self.assertEqual(self.events, [])
+
+    def test_switch_does_not_wait_for_token_refresh(self):
+        entered, release = threading.Event(), threading.Event()
+        self.service.account()['expires_at'] = 0
+        def request(url, *args, **kw):
+            if url.endswith('/oauth/token'):
+                entered.set()
+                if not release.wait(3): raise RuntimeError('test timed out')
+                return dict(access_token='renewed-a', refresh_token='rotated-a', expires_in=3600)
+            return dict(models=[dict(slug='a', visibility='list')])
+        with patch.object(b, 'request_json', side_effect=request), patch.object(self.service, 'spawn'):
+            worker = threading.Thread(target=self.service.discover)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                started = time.monotonic()
+                self.service.dispatch(dict(op='switch', id='b'))
+                self.assertLess(time.monotonic()-started, .5)
+                self.assertEqual(self.service.model, 'b')
+            finally:
+                release.set()
+                worker.join(3)
+            self.assertEqual(self.service.accounts['accounts']['a']['access_token'], 'renewed-a')
+            self.assertEqual(self.service.account()['access_token'], 'fake-b')
+
+    def test_rapid_round_trip_restarts_stale_catalog_load(self):
+        with patch.object(self.service, 'spawn') as spawn:
+            self.service.refresh_models()
+            self.service.dispatch(dict(op='switch', id='b'))
+            self.service.dispatch(dict(op='switch', id='a'))
+            self.assertEqual(spawn.call_count, 2)
+            # The original A worker starts after the user has already returned.
+            with patch.object(b, 'request_json') as network:
+                self.service.discover('a', 0)
+                network.assert_not_called()
+            self.assertEqual(spawn.call_count, 3)
+            self.assertEqual(spawn.call_args.args, (self.service.discover, 'a', 2))
+
+    def test_catalog_refresh_is_deduplicated_and_persisted(self):
+        with patch.object(self.service, 'spawn') as spawn:
+            self.service.refresh_models()
+            self.service.refresh_models()
+            spawn.assert_called_once()
+        with patch.object(b, 'request_json', return_value=dict(models=[dict(slug='new', visibility='list'), dict(slug='hidden', visibility='hide')])):
+            self.service.discover('a', 0)
+        self.assertEqual(self.service.model, 'new')
+        self.assertEqual(self.service.account()['models'], [dict(slug='new', name='new')])
+        self.assertFalse(self.service.discovering)
+        self.assertEqual(json.loads(self.service.creds_path.read_text())['accounts']['a']['models'], self.service.models)
+
+
 if __name__ == "__main__": unittest.main()
